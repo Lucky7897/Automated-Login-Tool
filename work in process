@@ -1,242 +1,247 @@
-from playwright.sync_api import sync_playwright
-import json
-import logging
-from urllib.parse import urlencode
-import time
 import os
+import json
+import sys
+import subprocess
+import logging
+import asyncio
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QLineEdit, 
+                             QFileDialog, QTextBrowser, QCheckBox, QMessageBox, QComboBox, 
+                             QProgressBar)
+from PyQt5.QtCore import Qt
+from playwright.async_api import async_playwright  # Use async Playwright API
+
+# List of required modules
+REQUIRED_MODULES = ['PyQt5', 'playwright']
+
+def install_package(package):
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    except subprocess.CalledProcessError as e:
+        print(f"Error installing package {package}: {e}")
+
+def check_and_install_modules():
+    for package in REQUIRED_MODULES:
+        try:
+            __import__(package)
+        except ImportError:
+            print(f"Module {package} not found. Installing...")
+            install_package(package)
+        else:
+            print(f"Module {package} is already installed.")
+
+# Ensure all required modules are available
+check_and_install_modules()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def random_delay(min_ms, max_ms, debug_mode=False):
-    """Pause the execution for a random duration between min_ms and max_ms milliseconds."""
-    if debug_mode:
-        time.sleep(5)  # Always wait 5 seconds in debug mode
-    else:
-        delay = (min_ms + (max_ms - min_ms) * 0.001)
-        time.sleep(delay)
+class LoginAutomationApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+        self.script_data = []
+        self.credentials = []
+        self.progress_bar.setValue(0)
+        self.paused = False
 
-def take_screenshot(page, step, debug_mode):
-    """Take a screenshot of the page if debug mode is enabled."""
-    if debug_mode:
-        page.screenshot(path=f'screenshot_{step}.png')
-        logging.info(f'Screenshot taken for step: {step}')
+    def init_ui(self):
+        self.setWindowTitle("Automated Login Tool - v2.0 - Asyncio")
+        self.setGeometry(100, 100, 800, 600)
 
-def confirm_selector(page, element_type, default_selector):
-    """Confirm the selector for an element in debug plus mode."""
-    logging.info(f"Captured {element_type} element with selector: {default_selector}")
-    is_correct = input(f"Is this selector for {element_type} correct? (y/n): ").strip().lower()
+        # Layout
+        layout = QVBoxLayout()
 
-    if is_correct == 'n':
-        return input(f"Please enter the correct CSS selector for the {element_type}: ").strip()
-    return default_selector
+        # Proxy input
+        self.proxy_label = QLabel("Proxy Type:")
+        self.proxy_type = QComboBox(self)
+        self.proxy_type.addItems(["None", "HTTP", "SOCKS5", "HTTPS", "SOCKS4"])
+        layout.addWidget(self.proxy_label)
+        layout.addWidget(self.proxy_type)
 
-def extract_form_details(page):
-    """Extract form details including action URL, input fields, and their types."""
-    form = page.query_selector('form')
-    if not form:
-        logging.error("No form found on the login page.")
-        raise Exception("No form found on the login page.")
+        self.proxy_input_label = QLabel("Proxy Address (Optional):")
+        self.proxy_input = QLineEdit(self)
+        layout.addWidget(self.proxy_input_label)
+        layout.addWidget(self.proxy_input)
 
-    action_url = form.get_attribute('action') or page.url
-    method = form.get_attribute('method') or 'get'
-    inputs = form.query_selector_all('input')
-    textareas = form.query_selector_all('textarea')
-    selects = form.query_selector_all('select')
+        self.proxy_auth_label = QLabel("Proxy Auth (Optional):")
+        self.proxy_auth = QLineEdit(self)
+        layout.addWidget(self.proxy_auth_label)
+        layout.addWidget(self.proxy_auth)
 
-    parameters = {}
-    for input_tag in inputs:
-        name = input_tag.get_attribute('name')
-        type_ = input_tag.get_attribute('type') or 'text'
-        if name:
-            parameters[name] = type_
+        # Username and Password fields
+        self.username_field_label = QLabel("Username Field Selector:")
+        self.username_field = QLineEdit(self)
+        layout.addWidget(self.username_field_label)
+        layout.addWidget(self.username_field)
 
-    for textarea in textareas:
-        name = textarea.get_attribute('name')
-        if name:
-            parameters[name] = 'textarea'
+        self.password_field_label = QLabel("Password Field Selector:")
+        self.password_field = QLineEdit(self)
+        layout.addWidget(self.password_field_label)
+        layout.addWidget(self.password_field)
 
-    for select in selects:
-        name = select.get_attribute('name')
-        if name:
-            parameters[name] = 'select'
+        # Success selector input
+        self.success_label = QLabel("Success Element Selector (Optional):")
+        self.success_input = QLineEdit(self)
+        layout.addWidget(self.success_label)
+        layout.addWidget(self.success_input)
 
-    if not parameters:
-        logging.error("No recognizable form fields found.")
-        raise Exception("No recognizable form fields found.")
+        # Custom Headers
+        self.headers_label = QLabel("Custom Headers (JSON):")
+        self.headers_input = QLineEdit(self)
+        layout.addWidget(self.headers_label)
+        layout.addWidget(self.headers_input)
 
-    logging.info(f'Extracted form action URL: {action_url}')
-    logging.info(f'Form method: {method}')
-    logging.info(f'Login parameters: {parameters}')
+        # Debug mode checkbox
+        self.debug_checkbox = QCheckBox("Enable Debug Mode")
+        layout.addWidget(self.debug_checkbox)
 
-    return action_url, method, parameters
+        # Headless mode checkbox
+        self.headless_checkbox = QCheckBox("Enable Headless Mode")
+        layout.addWidget(self.headless_checkbox)
 
-def perform_login(page, action_url, method, parameters, username, password, debug_mode, debug_plus_mode):
-    """Perform the login and handle different input types."""
-    if debug_plus_mode:
-        # Automatically detect elements and ask for confirmation
-        email_selector = page.locator('input[type="email"], input[name="email"], input[id*="email"]').first.evaluate('this.getAttribute("id")')
-        password_selector = page.locator('input[type="password"], input[name="password"], input[id*="password"]').first.evaluate('this.getAttribute("id")')
+        # Add a button to upload a credentials file
+        self.upload_credentials_button = QPushButton("Upload Accounts", self)
+        self.upload_credentials_button.clicked.connect(self.upload_credentials)
+        layout.addWidget(self.upload_credentials_button)
 
-        email_selector = confirm_selector(page, 'email', email_selector)
-        password_selector = confirm_selector(page, 'password', password_selector)
-    else:
-        # Use default selectors based on provided HTML
-        email_selector = 'input[name="email"]'
-        password_selector = 'input[name="password"]'
+        # Record Script button
+        self.record_script_button = QPushButton("Record Script", self)
+        self.record_script_button.clicked.connect(self.record_script)
+        layout.addWidget(self.record_script_button)
 
-    # Record user interactions for debug_plus_mode
-    if debug_plus_mode:
-        page.on('click', lambda e: logging.info(f'User clicked on: {e.target}'))
+        # Start button
+        self.start_button = QPushButton("Start", self)
+        self.start_button.clicked.connect(self.start_login_process)
+        layout.addWidget(self.start_button)
 
-    # Fill in the email and password fields
-    page.fill(email_selector, username)
-    page.fill(password_selector, password)
-    take_screenshot(page, 'form_filled', debug_mode)
+        # Log area
+        self.log_area = QTextBrowser(self)
+        self.log_area.setReadOnly(True)
+        layout.addWidget(self.log_area)
 
-    # Perform login by submitting the form
-    if method.upper() == 'POST':
-        with page.expect_navigation():
-            page.evaluate("document.querySelector('form').submit()")
-    else:  # For GET method
-        query_string = urlencode(parameters)
-        url_with_params = f"{action_url}?{query_string}"
-        page.goto(url_with_params)
-        take_screenshot(page, 'after_get_request', debug_mode)
+        # Progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setMinimum(0)
+        layout.addWidget(self.progress_bar)
 
-    # Capture response content
-    response = page.content()
-    logging.info(f'Response content after login: {response[:500]}')  # Log first 500 chars of the response
+        self.setLayout(layout)
 
-    return response
+    def upload_credentials(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Accounts File", "", "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            self.load_credentials(file_path)
 
-def generate_openbullet_config(action_url, parameters, headers, incomplete=False):
-    """Generate an OpenBullet configuration file based on the extracted parameters."""
-    body = "&".join(f"{key}={{ {key} }}" for key in parameters.keys())
-    filename = 'openbullet_config_incomplete.json' if incomplete else 'openbullet_config.json'
+    def load_credentials(self, file_path):
+        self.credentials = []
+        try:
+            with open(file_path, 'r') as file:
+                for line in file:
+                    username, password = line.strip().split(":")
+                    self.credentials.append((username, password))
+            self.log(f"{len(self.credentials)} accounts loaded.")
+        except Exception as e:
+            self.log(f"Error loading accounts: {e}")
 
-    config = {
-        "SETTINGS": {
-            "Name": "Generated Config",
-            "SuggestedBots": 100,
-            "MaxCPM": 0,
-            "LastModified": time.strftime('%Y-%m-%dT%H:%M:%S'),
-            "Author": "Grimoire",
-            "NeedsProxies": True,
-            "MaxRedirects": 8
-        },
-        "REQUESTS": [
-            {
-                "name": "Login",
-                "url": action_url,
-                "method": "POST",
-                "headers": headers,
-                "body": body
-            }
-        ]
-    }
+    def record_script(self):
+        self.script_data = []  # Reset the script data before recording
+        self.log("Starting browser for script recording...")
 
-    with open(filename, 'w') as f:
-        json.dump(config, f, indent=4)
-    status = 'INCOMPLETE' if incomplete else 'COMPLETE'
-    logging.info(f'OpenBullet configuration file ({status}) generated: {filename}')
+        async def record_browser_interaction():
+            async with async_playwright() as p:  # Switch to async_playwright
+                browser = await p.chromium.launch(headless=False)
+                page = await browser.new_page()
 
-def load_accounts_from_file():
-    """Load account credentials from a local text file."""
-    files = [f for f in os.listdir() if f.endswith('.txt')]
-    print("Available text files:")
-    for i, file in enumerate(files, 1):
-        print(f"{i}: {file}")
-    
-    choice = int(input("Select the file by number: ").strip())
-    if 1 <= choice <= len(files):
-        file_path = files[choice - 1]
-        with open(file_path, 'r') as file:
-            accounts = file.readlines()
-        return [line.strip().split(':') for line in accounts]
-    else:
-        raise ValueError("Invalid file selection.")
+                # Event listeners to track interactions
+                page.on("framenavigated", lambda frame: self.on_navigate(frame))
+                page.on("click", lambda event: self.on_click(event))
+                page.on("input", lambda event: self.on_input(event))
 
-def automate_openbullet_config(debug_mode=False, debug_plus_mode=False):
-    """Automate the entire process from parameter extraction to configuration file generation."""
-    use_file = input('Do you want to select a local txt file with credentials? (y/n): ').strip().lower() == 'y'
+                await page.goto("about:blank")  # Open a blank page for testing
+                self.log("Browser open. Record your actions.")
 
-    if use_file:
-        accounts = load_accounts_from_file()
-    else:
-        login_url = input('Enter the login URL: ').strip()
-        username = input('Enter the username: ').strip()
-        password = input('Enter the password: ').strip()
-        accounts = [(login_url, username, password)]
+                await asyncio.sleep(60)  # Keep the browser open for 60 seconds
+                await browser.close()
 
-    for i, account in enumerate(accounts[:10]):  # Limit to 10 accounts
-        if len(account) == 3:
-            login_url, username, password = account
-        elif len(account) == 2:
-            login_url, username = account
-            password = input(f"Enter the password for {username}: ").strip()
-        else:
-            logging.error(f'Invalid account format: {account}')
-            continue
+        asyncio.run(record_browser_interaction())
+        self.save_script()
 
-        logging.info(f'Processing account {i + 1}: {username}')
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=not debug_mode)
-            page = browser.new_page()
-            page.goto(login_url)
-            take_screenshot(page, 'initial_load', debug_mode)
+    def on_navigate(self, frame):
+        url = frame.url
+        self.script_data.append({"action": "navigate", "url": url})
+        self.log(f"Recorded navigation to: {url}")
 
-            try:
-                if debug_plus_mode:
-                    checkbox_prompt = input('Did the site include any checkboxes (like "I agree" or consent)? (y/n): ').strip().lower()
-                    if checkbox_prompt == 'y':
-                        legal_age_selector = input('Enter the selector for legal age checkbox: ').strip()
-                        privacy_selector = input('Enter the selector for privacy checkbox: ').strip()
-                        cookies_selector = input('Enter the selector for cookies checkbox: ').strip()
-                        accept_button_selector = input('Enter the selector for the ACCEPT button: ').strip()
-                        
-                        # Consent checkboxes
-                        logging.info('Checking consent checkboxes')
-                        page.locator(legal_age_selector).check()
-                        random_delay(1000, 2000, debug_mode)
-                        page.locator(privacy_selector).check()
-                        random_delay(1000, 2000, debug_mode)
-                        page.locator(cookies_selector).check()
-                        random_delay(1000, 2000, debug_mode)
-                        take_screenshot(page, 'consent_checkboxes_checked', debug_mode)
+    def on_click(self, element):
+        selector = element.selector
+        self.script_data.append({"action": "click", "selector": selector})
+        self.log(f"Recorded click on: {selector}")
 
-                        # Click ACCEPT button
-                        logging.info('Clicking the ACCEPT button')
-                        page.locator(accept_button_selector).click()
-                        random_delay(2000, 3000, debug_mode)
-                        take_screenshot(page, 'accept_button_clicked', debug_mode)
+    def on_input(self, element):
+        selector = element.selector
+        value = element.value
+        self.script_data.append({"action": "input", "selector": selector, "value": value})
+        self.log(f"Recorded input on {selector} with value {value}")
 
-                # Extract form details and perform login
-                action_url, method, parameters = extract_form_details(page)
-                response = perform_login(page, action_url, method, parameters, username, password, debug_mode, debug_plus_mode)
+    def save_script(self):
+        script_path = os.path.join(os.getcwd(), "login_script.json")
+        with open(script_path, "w") as f:
+            json.dump(self.script_data, f, indent=4)
+        self.log(f"Script saved to {script_path}")
 
-                # Prepare headers for OpenBullet config
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": page.evaluate("navigator.userAgent")
-                }
+    async def start_login_process(self):
+        if not self.credentials:
+            self.show_error("No accounts loaded. Please upload a file with accounts in 'username:password' format.")
+            return
 
-                # Check if login was successful and generate OpenBullet config
-                if 'dashboard' in response.lower() or 'welcome' in response.lower():
-                    logging.info(f'Login successful for {username}')
-                    generate_openbullet_config(action_url, parameters, headers)
-                else:
-                    logging.error(f'Login failed for {username}')
+        total_attempts = len(self.credentials)
+        self.progress_bar.setMaximum(total_attempts)
 
-            except Exception as e:
-                logging.error(f'An error occurred for {username}: {e}')
-                take_screenshot(page, 'error_occurred', debug_mode)
-            
-            finally:
-                browser.close()
+        tasks = []
+        async with async_playwright() as p:
+            for username, password in self.credentials:
+                task = asyncio.create_task(self.perform_login(p, username, password))
+                tasks.append(task)
+                self.progress_bar.setValue(self.progress_bar.value() + 1)
+
+            await asyncio.gather(*tasks)
+        self.log("All login attempts finished.")
+
+    async def perform_login(self, playwright, username, password):
+        try:
+            browser = await playwright.chromium.launch(headless=self.headless_checkbox.isChecked())
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            # Execute actions based on script
+            for action in self.script_data:
+                if action["action"] == "navigate":
+                    await page.goto(action["url"])
+                elif action["action"] == "click":
+                    await page.click(action["selector"])
+                elif action["action"] == "input":
+                    if "username" in action["selector"]:
+                        await page.fill(action["selector"], username)
+                    elif "password" in action["selector"]:
+                        await page.fill(action["selector"], password)
+
+            if await page.query_selector(self.success_input.text()):
+                self.log(f"Login successful for {username}")
+            else:
+                self.log(f"Login failed for {username}")
+
+            await browser.close()
+        except Exception as e:
+            self.log(f"Error for {username}: {e}")
+
+    def log(self, message):
+        self.log_area.append(message)
+
+    def show_error(self, message):
+        QMessageBox.critical(self, "Error", message)
 
 if __name__ == '__main__':
-    debug_mode = input('Enable debug mode? (y/n): ').strip().lower() == 'y'
-    debug_plus_mode = input('Enable debug plus mode? (y/n): ').strip().lower() == 'y'
-    automate_openbullet_config(debug_mode, debug_plus_mode)
+    check_and_install_modules()
+    app = QApplication(sys.argv)
+    login_app = LoginAutomationApp()
+    login_app.show()
+    sys.exit(app.exec_())
 
