@@ -109,6 +109,11 @@ class LoginAutomationApp(QWidget):
         self.record_script_button.clicked.connect(self.record_script)
         layout.addWidget(self.record_script_button)
 
+        # Import Script button
+        self.import_script_button = QPushButton("Import Script", self)
+        self.import_script_button.clicked.connect(self.import_script)
+        layout.addWidget(self.import_script_button)
+
         # Start button
         self.start_button = QPushButton("Start", self)
         self.start_button.clicked.connect(self.start_login_process)
@@ -186,6 +191,16 @@ class LoginAutomationApp(QWidget):
         with open(script_path, "w") as f:
             json.dump(self.script_data, f, indent=4)
         self.log(f"Script saved to {script_path}")
+
+    def import_script(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Script File", "", "JSON Files (*.json);;All Files (*)")
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    self.script_data = json.load(f)
+                self.log(f"Script imported from {file_path}.")
+            except Exception as e:
+                self.log(f"Error importing script: {e}")
 
     async def start_login_process(self):
         if not self.credentials:
